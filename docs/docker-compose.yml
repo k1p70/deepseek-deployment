@@ -1,0 +1,104 @@
+version: '3.8'
+
+# 自定义网桥，实现服务间网络隔离与互通
+networks:
+  deepseek-network:
+    driver: bridge
+
+# 数据卷持久化，避免容器重启数据丢失
+volumes:
+  mysql-data:
+  redis-data:
+  model-cache:
+
+services:
+  # 核心服务：DeepSeek LLM推理服务
+  deepseek-app:
+    build: .
+    container_name: deepseek-llm-app
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      # 模型配置
+      MODEL_PATH: /models
+      DEVICE: cpu
+      # MySQL配置（服务名直接作为域名，容器内网络互通）
+      MYSQL_HOST: deepseek-mysql
+      MYSQL_PORT: 3306
+      MYSQL_USER: deepseek_user
+      MYSQL_PASSWORD: DeepSeek@123
+      MYSQL_DATABASE: deepseek_db
+      # Redis配置
+      REDIS_HOST: deepseek-redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: DeepSeekRedis@123
+      REDIS_DB: 0
+      # 服务配置
+      DEBUG: "False"
+      WORKERS: 2
+    volumes:
+      # 挂载本地模型文件到容器内，无需重新构建镜像
+      - ./models:/models:ro
+      - model-cache:/app/.cache
+    depends_on:
+      - deepseek-mysql
+      - deepseek-redis
+    networks:
+      - deepseek-network
+    ulimits:
+      # 优化文件句柄数，提升高并发性能
+      nofile:
+        soft: 65535
+        hard: 65535
+
+  # 依赖服务：MySQL数据库
+  deepseek-mysql:
+    image: mysql:8.0
+    container_name: deepseek-mysql
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: Root@123456
+      MYSQL_DATABASE: deepseek_db
+      MYSQL_USER: deepseek_user
+      MYSQL_PASSWORD: DeepSeek@123
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      # 挂载初始化脚本，容器首次启动自动建表
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    command:
+      # MySQL性能优化配置
+      --default-authentication-plugin=mysql_native_password
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+      --max_connections=200
+      --wait_timeout=600
+    networks:
+      - deepseek-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-u$MYSQL_USER", "-p$MYSQL_PASSWORD", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # 依赖服务：Redis缓存
+  deepseek-redis:
+    image: redis:7.0
+    container_name: deepseek-redis
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+      # 挂载自定义Redis配置文件
+      - ./redis.conf:/usr/local/etc/redis/redis.conf:ro
+    command: redis-server /usr/local/etc/redis/redis.conf --requirepass DeepSeekRedis@123
+    networks:
+      - deepseek-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "DeepSeekRedis@123", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
